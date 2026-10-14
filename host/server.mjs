@@ -302,11 +302,11 @@ const PRICING_FILE = PRICING_CANDIDATES.find((f) => fs.existsSync(f)) || ''
 // 结算时机 = 「我开口说话时」：speak 代表这一轮要跟用户说话了 = 该报账了。
 // 用静默时间猜轮次结束在长任务下会误判（还在跑脚本就弹了消耗）。
 const TURN_QUIET_MS = Number(process.env.WHALE_TURN_QUIET_MS || 12000)
-// 兜底：万一某轮一声不吭（纯工具轮），用更长的静默时间收尾，避免账永远挂着
+// 兜底：万一某轮一声不吭（纯工具轮），用更长的静默时间收尾，避免账永远挂着。
+// ⚠ 这个值必须「足够长」：我干活时一个脚本跑几十秒很正常，中间两次 LLM 调用之间
+//   本来就会有长间隔。调短它会把同一轮拆成好几个泡泡、在还没干完时就弹账 ——
+//   这正是娅娅当初把结算时机改成以 speak 为界要解决的问题。别动它。
 const TURN_FALLBACK_MS = Number(process.env.WHALE_TURN_FALLBACK_MS || 90000)
-// ★ 无 speak 轮次的收尾时间（默认 6 秒）：TokenStats 的 s 字段只有 AI 真的
-//   <speak> 时才等于 'speak'，纯工具轮永远不会出现，靠 speak 结算就等不到。
-const TURN_NO_SPEAK_MS = Number(process.env.WHALE_TURN_NO_SPEAK_MS || 6000)
 // speak 后等多久结算（合并同一轮的多次说话）
 const SPEAK_SETTLE_MS = Number(process.env.WHALE_SPEAK_SETTLE_MS || 3000)
 const USAGE_SESSION = { id: 'alife-main', name: '' }
@@ -315,7 +315,6 @@ let usageTurn = 0        // 当前轮次号（每次进入新一轮 +1）
 let usageLastTs = 0      // 最近一条新行的时间
 let usagePending = false // 当前轮是否有未结算的累积
 let usageSpeakAt = 0     // 最近一次「我开口说话」的时间（说话即报账的触发点）
-let usageSawSpeak = false // 当前轮是否出现过 speak（决定用哪个静默期收尾）
 
 function emitSessionEvent(type, data) {
   const ev = { type, data }
@@ -341,15 +340,6 @@ function pollUsage() {
     emitSessionEvent('turn/end', { turn: usageTurn, reason: 'completed' })
     usagePending = false
     usageSpeakAt = 0
-    usageSawSpeak = false
-  }
-  // ★ 无 speak 轮次的兜底：纯工具轮（qchat/ChatWindow 触发、AI 一声不吭）在 TokenStats
-  //   的日志里 s 字段永远不会是 speak，靠 speak 结算就永远等不到。给一个短得多的静默期
-  //   （TURN_NO_SPEAK_MS，默认 6 秒）收尾。必须放在「无新行」分支里 —— 否则新行一进来
-  //   就会把计时器刷新，永远等不到。
-  if (usagePending && usageSawSpeak === false && now - usageLastTs > TURN_NO_SPEAK_MS) {
-    emitSessionEvent('turn/end', { turn: usageTurn, reason: 'completed' })
-    usagePending = false
   }
   if (lines.length === usageSeen) {
     // 没有新行 → 静默够久就结算本轮（对应原版的 turn/end）
@@ -367,10 +357,8 @@ function pollUsage() {
     if (!usagePending || now - usageLastTs > TURN_QUIET_MS) {
       if (usagePending) emitSessionEvent('turn/end', { turn: usageTurn, reason: 'completed' })
       usageTurn++
-      usageSawSpeak = false
     }
     const isSpeak = String(r.s || '') === 'speak'
-    if (isSpeak) usageSawSpeak = true
     // 口径修正：原版按「未命中输入 × miss价 + 命中缓存 × hit价」分开相加，
     // 而 TokenStats 的 i 是**输入总（含缓存）**，c 才是其中命中缓存的量。
     // 直接把 i 当 inputTokens 传会让缓存那部分按 miss 价重复算一遍（miss 价可达 hit 价 50 倍）。
