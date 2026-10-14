@@ -83,6 +83,24 @@ patch(LIB, 'lib: priceFor 使用定价文件',
   for (const r of LOCAL_PRICING) if (r.key && m.indexOf(r.key) !== -1) return r.table
   // 自定义单价同样按键长降序匹配（与 customPriceMetaFor 保持一致）`)
 
+// ⑧ 修复上游发布副本的「空候选表」缺陷。
+//   上游的发布脚本 _strip-dev-paths.mjs 会把 DATA_CANDIDATES_TAIL 里的开发机路径删光，
+//   于是这个数组变成 `[]`；但代码里仍然有 `DATA_CANDIDATES_TAIL[0] + '...'` 这种取用，
+//   结果拼出字面量 `undefined.dshw-usage.json` —— 会被真的写到进程工作目录（也就是插件目录）。
+//   实测症状：宿主跑一会儿，插件目录里冒出 undefined.dshw-turn.json / undefined.dshw-usage.json。
+//   这里把空表补成一个真实可用的兜底路径（DSH_HOME 下的 profiles/web），
+//   既保留原设计意图，又消除 undefined 前缀。
+patch(LIB, 'lib: 修复空候选表导致的 undefined 文件名',
+  `const DATA_CANDIDATES_TAIL = [
+]`,
+  `const DATA_CANDIDATES_TAIL = [
+  // ★ 移植补丁：上游发布副本里这里原本是空数组（发布脚本删掉了开发机路径），
+  //   而代码仍在取 DATA_CANDIDATES_TAIL[0]/[1] ⇒ 拼出字面量 "undefined.dshw-*.json"
+  //   并真的写进进程工作目录。补成真实可用的兜底路径。
+  path.join(DSH_HOME, 'profiles', 'web', path.sep),
+  path.join(DSH_HOME, 'profiles', 'web', path.sep),
+]`)
+
 // ============ assets/whale-widget.js ============
 
 // ② 内置厂商模板在「编辑已有模型」时不再被过滤掉

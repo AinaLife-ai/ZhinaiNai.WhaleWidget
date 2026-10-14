@@ -35,6 +35,11 @@ const IMAGE_CANDIDATES = [
 //   ⚠️ 这个常量必须在**所有**用到它的候选表之前定义（const 有 TDZ），所以放在最前面。
 //   ⚠️ `_strip-dev-paths.mjs` 会把发布副本里含开发机路径的行删掉，发布版只剩前两条 $DSH_HOME ✓
 const DATA_CANDIDATES_TAIL = [
+  // ★ 移植补丁：上游发布副本里这里原本是空数组（发布脚本删掉了开发机路径），
+  //   而代码仍在取 DATA_CANDIDATES_TAIL[0]/[1] ⇒ 拼出字面量 "undefined.dshw-*.json"
+  //   并真的写进进程工作目录。补成真实可用的兜底路径。
+  path.join(DSH_HOME, 'profiles', 'web', path.sep),
+  path.join(DSH_HOME, 'profiles', 'web', path.sep),
 ]
 // ⭐ 2026-10-02（用户要求"并成一份"）：**角色图库目录也 $DSH_HOME 优先**（开发机路径降级为兜底）。
 const ROLE_DIR_CANDIDATES = [

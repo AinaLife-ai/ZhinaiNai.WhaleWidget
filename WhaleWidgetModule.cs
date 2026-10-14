@@ -163,6 +163,11 @@ public class WhaleWidgetModule(
 
             StartWindow(port);
             logger.LogInformation($"小鲸鱼挂件已启动: http://127.0.0.1:{port}/");
+            if (File.Exists(Path.Combine(AlifePath.StorageFolderPath, "Tokenlog", "usage-log.jsonl")) == false)
+            {
+                logger.LogWarning("小鲸鱼挂件：「本轮消耗」气泡需要「Token用量看板」（1chuxin.TokenStats）插件提供用量日志，" +
+                    "当前未找到 {Storage}/Tokenlog/usage-log.jsonl —— 余额、记账、角色/泡泡/音效等其余功能不受影响。");
+            }
         }
         catch (Exception e)
         {
@@ -205,10 +210,12 @@ public class WhaleWidgetModule(
     /// <summary>把与原版共用的运行参数通过环境变量传给宿主，避免任何机器相关路径写死在脚本里。</summary>
     void ApplyCommonEnvironment(ProcessStartInfo startInfo)
     {
+        string storage = AlifePath.StorageFolderPath;
         startInfo.Environment["WHALE_SRC"] = Path.Combine(hostDir, "..", "upstream");
-        startInfo.Environment["WHALE_HOME"] = Path.Combine(AlifePath.StorageFolderPath, "WhaleWidget");
-        startInfo.Environment["WHALE_USAGE_LOG"] = Path.Combine(AlifePath.StorageFolderPath, "Tokenlog", "usage-log.jsonl");
-        startInfo.Environment["WHALE_PRICING"] = Path.Combine(AlifePath.StorageFolderPath, "Tokenlog", "pricing.json");
+        startInfo.Environment["WHALE_HOME"] = Path.Combine(storage, "WhaleWidget");
+        startInfo.Environment["WHALE_STORAGE"] = storage;
+        startInfo.Environment["WHALE_USAGE_LOG"] = Path.Combine(storage, "Tokenlog", "usage-log.jsonl");
+        startInfo.Environment["WHALE_PRICING"] = Path.Combine(storage, "Tokenlog", "pricing.json");
     }
 
     void StartServer(int port)

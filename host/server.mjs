@@ -18,6 +18,16 @@ const WHALE_HOME = process.env.WHALE_HOME
   || path.join(os.homedir() || process.env.USERPROFILE || '.', '.alife-whale')
 process.env.DSH_HOME = process.env.DSH_HOME || WHALE_HOME
 
+// ---------------- 定位 Alife 存储目录 ----------------
+// 由模块注入 WHALE_STORAGE（即 AlifePath.StorageFolderPath）。相对插件目录兜底推导：
+// 插件位于 {Storage}/Plugins/<插件ID>/，host/ 再下一级，所以向上 3 级即 Storage。
+// 这样即使模块没注入，也不会退化到「用户家目录」这种明显不对的位置。
+function guessStorage() {
+  if (process.env.WHALE_STORAGE) return process.env.WHALE_STORAGE
+  return path.resolve(import.meta.dirname, '..', '..', '..')
+}
+const STORAGE = guessStorage()
+
 // ---------------- 定位原版源码 ----------------
 // 优先环境变量；其次插件目录内的 upstream/（随插件一起分发）；最后兼容旧的手工部署目录名。
 const CANDIDATES = [
@@ -32,6 +42,7 @@ if (!SRC) {
 }
 console.log('[whale-host] 源码目录:', SRC)
 console.log('[whale-host] 用户数据目录:', WHALE_HOME)
+console.log('[whale-host] Alife 存储目录:', STORAGE)
 
 const PORT = Number(process.env.WHALE_PORT || 54321)
 const HOST = '127.0.0.1'
@@ -273,19 +284,29 @@ const server = http.createServer(async (req, res) => {
 // Alife 没有这个事件，但 TokenStats 把每轮真实用量写在 usage-log.jsonl 里。
 // 这里轮询该日志：读到新行 → 合成 assistant/message 事件（带真实 usage 与模型名）；
 // 结算时机以 speak 为界（见下），定价表、峰谷、自定义单价、泡泡文案全部复用原版逻辑。
+// 「本轮消耗」气泡的数据源由「Token用量看板」（1chuxin.TokenStats）插件提供：
+// 它把每轮真实用量逐行写到 {Storage}/Tokenlog/usage-log.jsonl。
 const USAGE_LOG_CANDIDATES = [
   process.env.WHALE_USAGE_LOG,
   path.join(WHALE_HOME, 'usage-log.jsonl'),
+  path.join(STORAGE, 'Tokenlog', 'usage-log.jsonl'),
 ].filter(Boolean)
 const USAGE_LOG = USAGE_LOG_CANDIDATES.find((f) => fs.existsSync(f)) || ''
 // 定价文件（可选）：与 Alife 的 Token 用量看板口径保持一致；文件不存在时用原版内置价目表。
-const PRICING_FILE = process.env.WHALE_PRICING || ''
+const PRICING_CANDIDATES = [
+  process.env.WHALE_PRICING,
+  path.join(STORAGE, 'Tokenlog', 'pricing.json'),
+].filter(Boolean)
+const PRICING_FILE = PRICING_CANDIDATES.find((f) => fs.existsSync(f)) || ''
 
 // 结算时机 = 「我开口说话时」：speak 代表这一轮要跟用户说话了 = 该报账了。
 // 用静默时间猜轮次结束在长任务下会误判（还在跑脚本就弹了消耗）。
 const TURN_QUIET_MS = Number(process.env.WHALE_TURN_QUIET_MS || 12000)
 // 兜底：万一某轮一声不吭（纯工具轮），用更长的静默时间收尾，避免账永远挂着
 const TURN_FALLBACK_MS = Number(process.env.WHALE_TURN_FALLBACK_MS || 90000)
+// ★ 无 speak 轮次的收尾时间（默认 6 秒）：TokenStats 的 s 字段只有 AI 真的
+//   <speak> 时才等于 'speak'，纯工具轮永远不会出现，靠 speak 结算就等不到。
+const TURN_NO_SPEAK_MS = Number(process.env.WHALE_TURN_NO_SPEAK_MS || 6000)
 // speak 后等多久结算（合并同一轮的多次说话）
 const SPEAK_SETTLE_MS = Number(process.env.WHALE_SPEAK_SETTLE_MS || 3000)
 const USAGE_SESSION = { id: 'alife-main', name: '' }
@@ -294,6 +315,7 @@ let usageTurn = 0        // 当前轮次号（每次进入新一轮 +1）
 let usageLastTs = 0      // 最近一条新行的时间
 let usagePending = false // 当前轮是否有未结算的累积
 let usageSpeakAt = 0     // 最近一次「我开口说话」的时间（说话即报账的触发点）
+let usageSawSpeak = false // 当前轮是否出现过 speak（决定用哪个静默期收尾）
 
 function emitSessionEvent(type, data) {
   const ev = { type, data }
@@ -319,6 +341,15 @@ function pollUsage() {
     emitSessionEvent('turn/end', { turn: usageTurn, reason: 'completed' })
     usagePending = false
     usageSpeakAt = 0
+    usageSawSpeak = false
+  }
+  // ★ 无 speak 轮次的兜底：纯工具轮（qchat/ChatWindow 触发、AI 一声不吭）在 TokenStats
+  //   的日志里 s 字段永远不会是 speak，靠 speak 结算就永远等不到。给一个短得多的静默期
+  //   （TURN_NO_SPEAK_MS，默认 6 秒）收尾。必须放在「无新行」分支里 —— 否则新行一进来
+  //   就会把计时器刷新，永远等不到。
+  if (usagePending && usageSawSpeak === false && now - usageLastTs > TURN_NO_SPEAK_MS) {
+    emitSessionEvent('turn/end', { turn: usageTurn, reason: 'completed' })
+    usagePending = false
   }
   if (lines.length === usageSeen) {
     // 没有新行 → 静默够久就结算本轮（对应原版的 turn/end）
@@ -336,8 +367,10 @@ function pollUsage() {
     if (!usagePending || now - usageLastTs > TURN_QUIET_MS) {
       if (usagePending) emitSessionEvent('turn/end', { turn: usageTurn, reason: 'completed' })
       usageTurn++
+      usageSawSpeak = false
     }
     const isSpeak = String(r.s || '') === 'speak'
+    if (isSpeak) usageSawSpeak = true
     // 口径修正：原版按「未命中输入 × miss价 + 命中缓存 × hit价」分开相加，
     // 而 TokenStats 的 i 是**输入总（含缓存）**，c 才是其中命中缓存的量。
     // 直接把 i 当 inputTokens 传会让缓存那部分按 miss 价重复算一遍（miss 价可达 hit 价 50 倍）。
@@ -380,7 +413,16 @@ async function main() {
   server.listen(PORT, HOST, () => {
     console.log('[whale-host] 已监听 http://' + HOST + ':' + PORT)
     console.log('[whale-host] 挂件页: http://' + HOST + ':' + PORT + '/')
-    console.log('[whale-host] 用量日志:', USAGE_LOG || '（未找到，本轮消耗气泡不可用）')
+    console.log('[whale-host] 用量日志:', USAGE_LOG || '（未找到）')
+    if (!USAGE_LOG) {
+      console.log('[whale-host] ⚠ 未找到用量日志 ⇒「本轮消耗」气泡不可用。')
+      console.log('[whale-host]   该功能需要先安装并激活「Token用量看板」（1chuxin.TokenStats）插件，')
+      console.log('[whale-host]   它会把每轮真实用量写到 {Storage}/Tokenlog/usage-log.jsonl。')
+      console.log('[whale-host]   已检查:', USAGE_LOG_CANDIDATES.join(' | '))
+    }
+    if (!PRICING_FILE) {
+      console.log('[whale-host] 提示: 未找到 pricing.json，将使用内置价目表计费。')
+    }
     for (const r of routes) console.log('   [route]', r.kind, r.path)
   })
 
